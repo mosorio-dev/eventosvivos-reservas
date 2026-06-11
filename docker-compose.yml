@@ -1,0 +1,26 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eventosvivos-api
+    environment:
+      ASPNETCORE_HTTP_PORTS: "8080"
+      Database__Provider: "Sqlite"
+      ConnectionStrings__Default: "Data Source=/data/eventosvivos.db"
+    volumes:
+      - eventos-data:/data
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: eventosvivos-web
+    depends_on:
+      - backend
+    ports:
+      - "4200:80"
+
+volumes:
+  eventos-data:
