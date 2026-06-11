@@ -2,17 +2,25 @@
 
 Núcleo del sistema de reservas para **EventosVivos**: creación de eventos, control de aforo en tiempo real, gestión de reservas/pagos y reportes de ocupación, con las reglas de negocio del enunciado implementadas y probadas.
 
-- **Backend:** .NET 8 (ASP.NET Core Web API) · Clean Architecture + CQRS (MediatR) · EF Core + SQLite
+- **Backend:** .NET 8 (ASP.NET Core Web API) · Clean Architecture + CQRS (MediatR) · EF Core (SQLite en local / PostgreSQL en la nube)
 - **Frontend:** Angular 18 (standalone components, signals, formularios reactivos)
 - **Pruebas:** xUnit (unitarias de dominio + integración de handlers contra SQLite real)
 
+> **Enfoque.** Prioricé aislar las reglas de negocio en un dominio puro y testeable, y tratar el resto (base de datos, transporte HTTP) como detalles intercambiables detrás de interfaces. Donde el enunciado es ambiguo, tomé una decisión y la documenté (sección 6). El despliegue se incluye como diferenciador, pero el foco está en la calidad del núcleo y en los casos borde.
+
 ## 🔗 Demo en vivo
 
-- **API (Render):** https://eventosvivos-reservas.onrender.com — [Swagger](https://eventosvivos-reservas.onrender.com/swagger) · [/api/venues](https://eventosvivos-reservas.onrender.com/api/venues)
-- **Frontend (Vercel):** _pendiente_
-- **Base de datos:** PostgreSQL en Supabase
+La aplicación está desplegada y funcionando:
 
-> El backend usa el plan gratuito de Render y se suspende tras inactividad: el primer request puede tardar ~50 s en responder.
+- **App (frontend):** https://eventosvivos-reservas.vercel.app — alojada en **Vercel**
+- **API (backend):** https://eventosvivos-reservas.onrender.com — [Swagger](https://eventosvivos-reservas.onrender.com/swagger) — alojada en **Render** (contenedor Docker)
+- **Base de datos:** **PostgreSQL** gestionada en **Supabase**
+
+**Cómo probarla.** Cualquiera puede explorar eventos y reservar entradas sin iniciar sesión (rol de usuario externo). Las acciones de administrador —crear eventos, confirmar pagos y ver los reportes de ocupación— requieren login con la cuenta demo:
+
+> **Usuario:** `admin` · **Contraseña:** `Admin123!`
+
+> Nota: el backend corre en el plan gratuito de Render y se suspende tras un rato de inactividad, así que la primera petición puede tardar ~50 s mientras el servicio "despierta".
 
 ---
 
@@ -23,7 +31,7 @@ Núcleo del sistema de reservas para **EventosVivos**: creación de eventos, con
 | API | ASP.NET Core 8 (controllers) | Estándar, RESTful, OpenAPI/Swagger integrado |
 | Orquestación | MediatR (CQRS) | Separa comandos/consultas, handlers pequeños y testeables |
 | Validación | FluentValidation + pipeline behavior | Validación de entrada centralizada y declarativa |
-| Persistencia | EF Core 8 + SQLite | Cero infraestructura, corre con un comando, persistencia real |
+| Persistencia | EF Core 8 · SQLite (local) / PostgreSQL (nube) | SQLite corre sin infraestructura; el proveedor se cambia por configuración, sin tocar el dominio |
 | Dominio | C# puro (sin dependencias) | Reglas de negocio aisladas y 100% testeables |
 | Frontend | Angular 18 standalone | Última versión, sin NgModules, signals y control flow `@if/@for` |
 
@@ -41,7 +49,7 @@ Se eligió **Clean Architecture** con **CQRS**. La dependencia apunta siempre ha
 │             EventosVivos.Application            │  Commands/Queries (MediatR), DTOs, validators,
 │  depende de Domain                              │  interfaces (IAppDbContext, IDateTimeProvider…)
 ├───────────────────────────────────────────────┤
-│            EventosVivos.Infrastructure          │  AppDbContext (EF Core/SQLite), configuraciones,
+│            EventosVivos.Infrastructure          │  AppDbContext (EF Core · SQLite/PostgreSQL), config,
 │  depende de Application + Domain                │  seed, generador de códigos, reloj del sistema
 ├───────────────────────────────────────────────┤
 │               EventosVivos.Domain               │  Entidades, value objects, enums y políticas
@@ -130,8 +138,12 @@ El cambio SQLite → PostgreSQL es solo configuración (no se toca el dominio):
 
 ```
 Database__Provider=Postgres
-ConnectionStrings__Default=Host=db.<ref>.supabase.co;Port=5432;Database=postgres;Username=postgres;Password=...;SSL Mode=Require;Trust Server Certificate=true
+ConnectionStrings__Default=Host=aws-0-<region>.pooler.supabase.com;Port=5432;Database=postgres;Username=postgres.<ref>;Password=...;SSL Mode=Require;Trust Server Certificate=true
 ```
+
+> En Render se usa el **Session Pooler** de Supabase (compatible con IPv4; la conexión directa de Supabase es IPv6). `AddInfrastructure` acepta la cadena tanto en formato keyword de Npgsql como en URI `postgresql://…` y la normaliza.
+>
+> Para producción conviene sobreescribir también `Jwt__Key` (clave larga y secreta) y `Auth__AdminPassword` como variables de entorno en Render, en lugar de los valores demo de `appsettings.json`.
 
 Paso a paso completo en **[DEPLOY.md](DEPLOY.md)**.
 
@@ -141,17 +153,20 @@ Paso a paso completo en **[DEPLOY.md](DEPLOY.md)**.
 
 Base: `/api`. Los enums se serializan/leen como strings en *camelCase* (`conferencia`, `activo`, `pendientePago`…).
 
-| Método | Ruta | Descripción | RF |
-|---|---|---|---|
-| POST | `/api/events` | Crear evento | RF-01 |
-| GET | `/api/events` | Listar con filtros `type, venueId, status, title, startFromUtc, startToUtc` | RF-02 |
-| GET | `/api/events/{id}` | Detalle de evento | — |
-| GET | `/api/events/{id}/report` | Reporte de ocupación | RF-06 |
-| GET | `/api/events/{id}/reservations` | Reservas de un evento | — |
-| POST | `/api/reservations` | Reservar entradas | RF-03 |
-| POST | `/api/reservations/{id}/confirm` | Confirmar pago | RF-04 |
-| POST | `/api/reservations/{id}/cancel` | Cancelar reserva | RF-05 |
-| GET | `/api/venues` | Catálogo de venues | — |
+| Método | Ruta | Descripción | Acceso | RF |
+|---|---|---|---|---|
+| POST | `/api/auth/login` | Login admin → JWT | Público | — |
+| POST | `/api/events` | Crear evento | 🔒 Admin | RF-01 |
+| GET | `/api/events` | Listar con filtros `type, venueId, status, title, startFromUtc, startToUtc` | Público | RF-02 |
+| GET | `/api/events/{id}` | Detalle de evento | Público | — |
+| GET | `/api/events/{id}/report` | Reporte de ocupación | 🔒 Admin | RF-06 |
+| GET | `/api/events/{id}/reservations` | Reservas de un evento | 🔒 Admin | — |
+| POST | `/api/reservations` | Reservar entradas | Público | RF-03 |
+| POST | `/api/reservations/{id}/confirm` | Confirmar pago | 🔒 Admin | RF-04 |
+| POST | `/api/reservations/{id}/cancel` | Cancelar reserva | Público | RF-05 |
+| GET | `/api/venues` | Catálogo de venues | Público | — |
+
+Los endpoints 🔒 requieren `Authorization: Bearer <token>` (rol `Admin`). Sin token o expirado devuelven **401**. El token se obtiene en `/api/auth/login` y en Swagger se pega con el botón **Authorize**.
 
 ### Contrato de errores (RFC 7807 / ProblemDetails)
 
@@ -216,6 +231,8 @@ El enunciado deja varios casos borde abiertos. Estas son las decisiones tomadas 
 
 9. **Concurrencia / overselling.** La verificación de aforo y el alta de la reserva ocurren en el handler. Para el alcance de la prueba (SQLite, escrituras serializadas) es suficiente. En producción se reforzaría con una transacción `SERIALIZABLE` o un token de concurrencia optimista sobre un contador de aforo por evento, para descartar condiciones de carrera bajo alta concurrencia.
 
+10. **Bootstrap de esquema agnóstico al proveedor.** `EnsureCreated()` no crea tablas si la base ya existe, y un Postgres gestionado como Supabase trae la base `postgres` con esquemas de sistema (`auth`, `storage`…) que hacen que `HasTables()` dé un falso positivo. Por eso el seeder comprueba si existe *nuestra* tabla y crea el esquema solo cuando falta — el mismo código funciona para un SQLite recién creado y para un Postgres preexistente. Detalle real que apareció al desplegar, no en teoría.
+
 ---
 
 ## 7. Pruebas
@@ -233,14 +250,15 @@ El reloj se inyecta vía `IDateTimeProvider` (fake en tests) para que las reglas
 - Sin SQL crudo: EF Core parametriza todas las consultas.
 - Contrato de error uniforme que **no** filtra *stack traces* (los 500 se loguean en servidor y devuelven un mensaje genérico).
 - CORS restringible por configuración (`Cors:AllowedOrigins`).
-- *Nota:* no se incluyó autenticación porque el enunciado define acciones de "usuario" y "administrador" a nivel funcional pero no pide auth. La separación natural de endpoints (reservar vs. confirmar pago) permite añadir autorización por rol (p. ej. JWT + políticas) sin tocar el dominio.
+- **Autenticación JWT + autorización por rol.** El enunciado distingue dos actores: el **administrador** (confirmar pagos, crear eventos, ver reportes) y el **usuario externo** (reservar, cancelar). Se implementó con JWT (HS256): `POST /api/auth/login` emite un token con el claim de rol `Admin`, y los endpoints sensibles están protegidos con `[Authorize(Roles = "Admin")]`. El frontend guarda el token, lo adjunta vía interceptor, protege las rutas de admin con un guard y reacciona a los 401 cerrando sesión. La clave de firma y las credenciales se inyectan por configuración (`Jwt:Key`, `Auth:AdminPassword`) — en producción se sobreescriben por variables de entorno.
+- *Alcance:* para el tamaño de la prueba hay una sola cuenta de administrador (credenciales en config); una versión productiva usaría un *user store* con contraseñas hasheadas (ASP.NET Identity) y, según el caso, OIDC o *refresh tokens*. El diseño lo permite sin tocar el dominio.
 
 ---
 
 ## 9. Posibles mejoras
 
-- Autenticación/autorización por roles (JWT) sobre los endpoints de administración.
-- Migraciones EF versionadas (hoy se usa `EnsureCreated` por simplicidad de arranque).
+- *User store* con contraseñas hasheadas (ASP.NET Identity) y refresh tokens / OIDC, en lugar de la cuenta de admin única por configuración.
+- Migraciones EF versionadas (hoy el esquema se crea en el arranque cuando falta; las migraciones aportarían historial y evolución controlada del esquema).
 - Concurrencia optimista sobre el aforo para escenarios de alta demanda.
 - Paginación en el listado de eventos.
 - Tests E2E del frontend (Playwright) y unitarios de componentes.
